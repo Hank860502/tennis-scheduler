@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>網球中心場地調度儀表板</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; }
+        .print-hide { display: block; }
+        @media print {
+            .print-hide { display: none; }
+            .print-container { width: 100%; max-width: none; padding: 0; }
+            body { -webkit-print-color-adjust: exact; }
+            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #bbb; }
+        
+        /* 拖曳與互動樣式 */
+        .draggable-item { cursor: pointer; } 
+        .draggable-item:active { cursor: grabbing; }
+        .drag-over { 
+            background-color: #f0fdf4 !important; 
+            border: 2px dashed #16a34a !important; 
+            z-index: 5;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect, useRef } = React;
+
+        // 網球場配置與分類
+        const COURTS = [
+            { id: '1', name: '1號場 (教練)', type: 'coach' },
+            { id: '2', name: '2號場 (教練)', type: 'coach' },
+            { id: '3', name: '3號場 (教練)', type: 'coach' },
+            { id: '4', name: '4號場 (教練)', type: 'coach-blue' }, 
+            { id: '5', name: '5號場', type: 'public' },
+            { id: '6', name: '6號場', type: 'public' },
+            { id: '7', name: '7號場', type: 'public' },
+            { id: '8', name: '8號場', type: 'public' },
+            { id: '9', name: '9號場', type: 'public' },
+            { id: '10', name: '10號場 (教練)', type: 'coach' },
+            { id: 'central', name: '中央球場', type: 'public' },
+            { id: 'park1', name: '臺中公園1號（公園側）', type: 'park' }, 
+            { id: 'park2', name: '臺中公園2號（馬路側）', type: 'park' }      
+        ];
+
+        // 營運時間 06:00 - 22:00 (以半小時為單位，06:00 ~ 21:30)
+        const HALF_HOURS = Array.from({ length: 32 }, (_, i) => {
+            const totalMinutes = 6 * 60 + i * 30;
+            const hour = Math.floor(totalMinutes / 60);
+            const minute = totalMinutes % 60;
+            return { hour, minute, index: i };
+        });
+
+        const BLOCKOUT_KEYWORD = 'BLOCKOUT'; // 內部休假/活動的關鍵字
+
+        // --- 樣式設定函式 ---
+        const getCourtStyles = (type, isHeader = false) => {
+            // 教練場主色：#002050
+            const coachPrimaryColor = '#002050'; 
+            
+            switch (type) {
+                case 'coach': // 1, 2, 3, 10 (深海軍藍系)
+                    return isHeader 
+                        ? `bg-[${coachPrimaryColor}] text-white border-blue-400` 
+                        : `bg-blue-50 border-blue-300 text-gray-900 hover:bg-blue-100`;
+                case 'coach-blue': // 4 (藍色系 - 與其他教練場區隔)
+                    return isHeader 
+                        ? 'bg-blue-600 text-white border-blue-400' 
+                        : 'bg-blue-50 border-blue-200 text-blue-800 hover:bg-blue-100';
+                case 'public': // 5-9, central (綠色系)
+                    return isHeader 
+                        ? 'bg-green-400 text-white border-green-400' 
+                        : 'bg-green-50 border-green-200 text-green-800 hover:bg-green-100';
+                case 'park': // park1, park2 (紅土色系 - 赤陶色)
+                    const clayColorHeader = 'bg-red-700 text-white border-red-500';
+                    const clayColorBooking = 'bg-red-100 border-red-300 text-red-900 hover:bg-red-200';
+                    return isHeader ? clayColorHeader : clayColorBooking;
+                default:
+                    return isHeader ? 'bg-gray-700 text-white' : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100';
+            }
+        };
+
+        const getBookingStyles = (booking) => {
+            if (booking.customerName === BLOCKOUT_KEYWORD || booking.customerName === '休假' || booking.customerName === '訓練' || booking.customerName === '活動') {
+                return 'bg-gray-300 border-gray-500 text-gray-800 shadow-none hover:bg-gray-400';
+            }
+
+            const baseStyle = getCourtStyles(booking.courtType, false);
+            if (booking.isDeleted) {
+                // 已刪除
+                return `bg-red-50 border-red-200 text-red-400 line-through opacity-80 ${baseStyle.replace(/bg-\w+-\d+/, 'bg-red-50').replace(/text-\w+-\d+/, 'text-red-400')}`;
+            }
+            if (booking.isNew) {
+                // 新增待確認
+                return `bg-yellow-100 border-yellow-400 text-yellow-900 shadow-md ${baseStyle.replace(/bg-\w+-\d+/, 'bg-yellow-100').replace(/border-\w+-\d+/, 'border-yellow-400')}`;
+            }
+            return baseStyle; // 正常顏色
+        };
+
+        // 格式化分鐘數為 HH:MM
+        const formatTime = (mins) => {
+            const h = Math.floor(mins / 60);
+            const m = mins % 60;
+            return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+        };
+
+        // --- Modal 元件: 新增預約 (支援半小時) ---
+        const AddBookingModal = ({ isOpen, onClose, onSave, initialData }) => {
+            if (!isOpen) return null;
+            
+            const [formData, setFormData] = useState({
+                customerName: '',
+                notes: '',
+                duration: 1,
+                startMinute: initialData.minute || 0 // 0 or 30
+            });
+
+            useEffect(() => {
+                if (isOpen) {
+                    setFormData({ customerName: '', notes: '', duration: 1, startMinute: initialData.minute || 0 });
+                }
+            }, [isOpen, initialData.minute]);
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (!formData.customerName.trim()) {
+                    alert("請輸入消費者名稱或輸入 BLOCKOUT 進行場地封鎖");
+                    return;
+                }
+                onSave(formData);
+                onClose();
+            };
+
+            const courtName = COURTS.find(c => c.id === initialData.courtId)?.name || '';
+            const baseHour = initialData.hour;
+
+            // 生成時數選項 (0.5 ~ 6.0)
+            const durationOptions = [];
+            for (let i = 0.5; i <= 6; i += 0.5) {
+                durationOptions.push(i);
+            }
+            
+            const isBlockout = formData.customerName.toUpperCase() === BLOCKOUT_KEYWORD;
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm print-hide">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden transform transition-all scale-100">
+                        <div className={`px-6 py-4 flex justify-between items-center ${isBlockout ? 'bg-gray-600 text-white' : 'bg-gray-800 text-white'}`}>
+                            <h3 className="text-lg font-bold">{isBlockout ? '新增場地封鎖 [BLOCKOUT]' : '新增預約 (半小時單位)'}</h3>
+                            <button onClick={onClose} className="text-gray-400 hover:text-white">
+                                <i className="fas fa-times"></i>
+                            </button>
+                        </div>
+                        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                            <div className="grid grid-cols-2 gap-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
+                                <div>
+                                    <label className="text-xs text-gray-500 block mb-1">場地</label>
+                                    <div className="font-bold text-gray-800">{courtName}</div>
+                                </div>
+                                <div>
+                                    <label className="text-xs text-gray-500 block mb-1">起始時間</label>
+                                    <div className="font-bold text-gray-800">{formatTime(baseHour * 60 + formData.startMinute)}</div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    {isBlockout ? '封鎖關鍵字' : '消費者名稱'} <span className="text-red-500">*</span>
+                                </label>
+                                <input 
+                                    type="text" 
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    placeholder="輸入 BLOCKOUT 進行封鎖，或輸入客戶名稱"
+                                    value={formData.customerName}
+                                    onChange={e => setFormData({...formData, customerName: e.target.value})}
+                                    autoFocus
+                                />
+                                {isBlockout && <p className="text-xs text-gray-500 mt-1 text-red-500 font-bold">此預約將標記為灰色 [封鎖]，不計入使用率。</p>}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">開始時間 (分鐘)</label>
+                                    <select 
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        value={formData.startMinute}
+                                        onChange={e => setFormData({...formData, startMinute: parseInt(e.target.value)})}
+                                    >
+                                        <option value={0}>{baseHour}:00</option>
+                                        <option value={30}>{baseHour}:30</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">預約時數</label>
+                                    <select 
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        value={formData.duration}
+                                        onChange={e => setFormData({...formData, duration: parseFloat(e.target.value)})}
+                                    >
+                                        {durationOptions.map(h => (
+                                            <option key={h} value={h}>{h} 小時</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">備註</label>
+                                <input 
+                                    type="text" 
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    placeholder="例如：尚未付款、需要借球拍..."
+                                    value={formData.notes}
+                                    onChange={e => setFormData({...formData, notes: e.target.value})}
+                                />
+                            </div>
+
+                            <div className="flex gap-3 mt-6">
+                                <button type="button" onClick={onClose} className="flex-1 py-2 px-4 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium">
+                                    取消
+                                </button>
+                                <button type="submit" className={`flex-1 py-2 px-4 text-white rounded-lg font-medium shadow-sm ${isBlockout ? 'bg-gray-500 hover:bg-gray-700' : 'bg-yellow-500 hover:bg-yellow-600'}`}>
+                                    確認新增
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Modal 元件: 刪除/管理預約 ---
+        const DeleteBookingModal = ({ isOpen, onClose, onDelete, booking, onRestore }) => {
+            if (!isOpen || !booking) return null;
+
+            const courtName = COURTS.find(c => c.id === booking.courtId)?.name || '';
+            const timeStr = booking.timeDisplay;
+            const isDeleted = booking.isDeleted;
+            const isBlockout = booking.customerName.toUpperCase() === BLOCKOUT_KEYWORD;
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm print-hide">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
+                        <div className={`px-6 py-4 border-b flex items-center gap-3 ${isDeleted ? 'bg-gray-100 border-gray-200' : (isBlockout ? 'bg-gray-200 border-gray-300' : 'bg-red-50 border-red-100')}`}>
+                            <div className={`p-2 rounded-full ${isDeleted ? 'bg-gray-300 text-gray-600' : (isBlockout ? 'bg-gray-300 text-gray-600' : 'bg-red-100 text-red-600')}`}>
+                                <i className={`fas ${isDeleted ? 'fa-undo' : 'fa-trash-alt'}`}></i>
+                            </div>
+                            <h3 className={`text-lg font-bold ${isDeleted ? 'text-gray-800' : (isBlockout ? 'text-gray-700' : 'text-red-800')}`}>
+                                {isDeleted ? '還原預約' : (isBlockout ? '刪除場地封鎖' : '刪除預約')}
+                            </h3>
+                        </div>
+                        
+                        <div className="p-6 space-y-4">
+                            {isDeleted ? (
+                                <p className="text-gray-600 text-sm">確定要取消標記這筆刪除紀錄，恢復為正常預約嗎？</p>
+                            ) : (
+                                <p className="text-gray-600 text-sm">
+                                    確定要刪除此預約嗎？<br/>
+                                    <span className="text-xs text-red-500 font-bold mt-1 block">
+                                        {isBlockout ? '(封鎖紀錄會直接移除，不影響資料庫)' : '(若是 CSV 匯入的紀錄，將標記紅色刪除線，提醒您去資料庫刪單)'}
+                                    </span>
+                                </p>
+                            )}
+                            
+                            <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 space-y-2 text-sm">
+                                <div className="flex justify-between">
+                                    <span className="text-gray-500">場地：</span>
+                                    <span className="font-medium text-gray-900">{courtName}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                    <span className="text-gray-500">時間：</span>
+                                    <span className="font-medium text-gray-900">{timeStr}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                    <span className="text-gray-500">客戶/類型：</span>
+                                    <span className="font-bold text-gray-900">{isBlockout ? '場地封鎖' : booking.customerName}</span>
+                                </div>
+                                {booking.customerPhone && (
+                                    <div className="flex justify-between">
+                                        <span className="text-gray-500">電話：</span>
+                                        <span className="font-medium text-gray-900">{booking.customerPhone}</span>
+                                    </div>
+                                )}
+                                {booking.notes && (
+                                    <div className="flex justify-between">
+                                        <span className="text-gray-500">備註：</span>
+                                        <span className="font-medium text-gray-900">{booking.notes}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex gap-3 mt-4">
+                                <button onClick={onClose} className="flex-1 py-2 px-4 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium">
+                                    取消
+                                </button>
+                                {isDeleted ? (
+                                    <button onClick={() => { onRestore(booking.id); onClose(); }} className="flex-1 py-2 px-4 bg-gray-600 text-white rounded-lg hover:bg-gray-700 font-medium shadow-sm">
+                                        還原預約
+                                    </button>
+                                ) : (
+                                    <button onClick={() => { onDelete(booking.id); onClose(); }} className="flex-1 py-2 px-4 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium shadow-sm">
+                                        確認刪除
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [bookings, setBookings] = useState([]);
+            const [fileName, setFileName] = useState("");
+            const [reportDate, setReportDate] = useState("");
+            const [errorMsg, setErrorMsg] = useState("");
+            const [dragOverCell, setDragOverCell] = useState(null); 
+            
+            // Modal 狀態
+            const [addModalState, setAddModalState] = useState({ isOpen: false, courtId: null, hour: null, minute: null });
+            const [deleteModalState, setDeleteModalState] = useState({ isOpen: false, booking: null });
+
+            useEffect(() => {
+                if (!reportDate) {
+                    setReportDate(new Date().toISOString().split('T')[0]);
+                }
+            }, [reportDate]);
+
+            const handleFileUpload = (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+                setFileName(file.name);
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        processCSV(e.target.result);
+                    } catch (err) {
+                        setErrorMsg("讀取檔案失敗，請確認格式。");
+                        console.error(err);
+                    }
+                };
+                reader.readAsText(file);
+            };
+
+            const parseCSVContent = (text) => {
+                // 這是 V7.0 的核心解析邏輯，用於處理複雜的 CSV 格式（包含換行和引號）
+                const rows = [];
+                let currentRow = [];
+                let currentVal = '';
+                let inQuotes = false;
+                
+                for (let i = 0; i < text.length; i++) {
+                    const char = text[i];
+                    const nextChar = text[i + 1];
+                    
+                    if (inQuotes) {
+                        if (char === '"' && nextChar === '"') {
+                            currentVal += '"';
+                            i++; 
+                        } else if (char === '"') {
+                            inQuotes = false;
+                        } else {
+                            currentVal += char;
+                        }
+                    } else {
+                        if (char === '"') {
+                            inQuotes = true;
+                        } else if (char === ',') {
+                            currentRow.push(currentVal.trim());
+                            currentVal = '';
+                        } else if (char === '\r' || char === '\n') {
+                            if (char === '\r' && nextChar === '\n') i++;
+                            currentRow.push(currentVal.trim());
+                            if (currentRow.length > 0 && (currentRow.length > 1 || currentRow[0] !== '')) {
+                                rows.push(currentRow);
+                            }
+                            currentRow = [];
+                            currentVal = '';
+                        } else {
+                            currentVal += char;
+                        }
+                    }
+                }
+                if (currentVal || currentRow.length) {
+                    currentRow.push(currentVal.trim());
+                    rows.push(currentRow);
+                }
+                return rows;
+            };
+
+            // 處理 CSV 檔案內容
+            const processCSV = (csvText) => {
+                const allRows = parseCSVContent(csvText);
+                if (allRows.length === 0) {
+                    setErrorMsg("檔案似乎是空的或格式無法讀取。");
+                    return;
+                }
+
+                const newBookings = [];
+                let dateFound = "";
+
+                let headerIndex = -1;
+                for (let i = 0; i < allRows.length; i++) {
+                    // 尋找標頭列 (包含關鍵字)
+                    if (allRows[i].some(h => h.includes("消費者暱稱") || h.includes("產品名稱") || h.includes("服務時間"))) {
+                        headerIndex = i;
+                        break;
+                    }
+                }
+
+                if (headerIndex === -1) {
+                    setErrorMsg("無法識別標題列，請確認檔案包含「消費者暱稱」、「服務時間」等關鍵欄位。");
+                    return;
+                }
+
+                const headers = allRows[headerIndex].map(h => h.trim());
+                const getIndex = (name) => headers.findIndex(h => h === name);
+                
+                const idxProductName = getIndex("產品名稱");
+                const idxServiceTime = getIndex("服務時間");
+                const idxCustomerNick = getIndex("消費者暱稱");
+                const idxCustomerName = getIndex("消費者姓名");
+                const idxCustomerPhone = getIndex("消費者電話"); // 新增電話欄位
+                const idxNotes = getIndex("產品備註");
+
+                // 由於 CSV 預設一筆資料為 1 小時，且需要計算一個穩定 ID
+                let reservationCounter = 0; 
+
+                for (let i = headerIndex + 1; i < allRows.length; i++) {
+                    const columns = allRows[i];
+                    if (!columns[idxProductName] && !columns[idxServiceTime]) continue;
+
+                    const rawTime = columns[idxServiceTime] || ""; 
+                    const rawProduct = columns[idxProductName] || "";
+                    
+                    let customerName = "未知客戶";
+                    if (idxCustomerNick !== -1 && columns[idxCustomerNick] && columns[idxCustomerNick].trim() !== '') {
+                        customerName = columns[idxCustomerNick];
+                    } else if (idxCustomerName !== -1 && columns[idxCustomerName] && columns[idxCustomerName].trim() !== '') {
+                        customerName = columns[idxCustomerName];
+                    }
+
+                    const customerPhone = idxCustomerPhone !== -1 ? columns[idxCustomerPhone] : "";
+                    const notes = idxNotes !== -1 ? columns[idxNotes] : "";
+
+                    if (!rawTime || !rawProduct) continue;
+
+                    const timeMatch = rawTime.match(/(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})/);
+                    if (timeMatch) {
+                        const date = timeMatch[1];
+                        const hour = parseInt(timeMatch[2], 10);
+                        const minute = parseInt(timeMatch[3], 10);
+                        if (!dateFound) dateFound = date;
+
+                        if (hour >= 22) continue; // 忽略 22:00 以後的預約
+
+                        let courtId = null;
+                        
+                        // 場地識別邏輯 (已強化)
+                        if (rawProduct.includes("中央")) {
+                            courtId = "central";
+                        } else if (rawProduct.includes("臺中公園") || rawProduct.includes("台中公園")) {
+                            if (rawProduct.includes("1號") || rawProduct.includes("公園側")) {
+                                courtId = "park1";
+                            } else if (rawProduct.includes("2號") || rawProduct.includes("馬路側")) {
+                                courtId = "park2";
+                            }
+                        } else {
+                            const courtMatch = rawProduct.match(/(\d+)號/);
+                            if (courtMatch) {
+                                courtId = courtMatch[1];
+                            }
+                        }
+
+                        if (courtId) {
+                            const courtConfig = COURTS.find(c => c.id === courtId);
+                            const courtType = courtConfig ? courtConfig.type : 'public';
+                            
+                            // CSV 匯入無法得知完整持續時間，預設為 1 小時 (60分鐘)
+                            const startTotalMinutes = hour * 60 + minute;
+                            const durationMinutes = 60;
+                            const endTotalMinutes = startTotalMinutes + durationMinutes;
+                            
+                            const timeDisplay = `${formatTime(startTotalMinutes)} - ${formatTime(endTotalMinutes)}`;
+
+                            let bookingsForReservation = [];
+                            
+                            // *** 新增穩定預約 ID ***
+                            const uniqueReservationId = `csv-${reservationCounter++}-${courtId}`; 
+                            
+                            // 檢查預約所佔用的半小時網格 (Grid Slot)
+                            const startGridIndex = Math.floor(startTotalMinutes / 30) - (6 * 2); // 06:00 是 index 0
+                            const endGridIndex = Math.ceil(endTotalMinutes / 30) - (6 * 2);
+
+                            for (let idx = startGridIndex; idx < endGridIndex; idx++) {
+                                const gridSlot = HALF_HOURS.find(h => h.index === idx);
+                                if (!gridSlot) continue; 
+                                
+                                bookingsForReservation.push({
+                                    id: Math.random().toString(36).substr(2, 9), // Slot ID (for React keys/single cell reference)
+                                    reservationId: uniqueReservationId, // <-- 穩定 ID
+                                    courtId,
+                                    courtType,
+                                    hour: gridSlot.hour, // 儲存該半小時格所在的整點小時
+                                    minute: gridSlot.minute, // 儲存該半小時格的分鐘數 (0或30)
+                                    gridIndex: idx, // 半小時網格的唯一索引
+                                    customerName,
+                                    customerPhone, // 傳遞電話號碼
+                                    notes,
+                                    rawProduct,
+                                    isCoachProduct: rawProduct.includes("教練"),
+                                    isNew: false, 
+                                    isDeleted: false,
+                                    startTotalMinutes, // 全局開始時間（分鐘）
+                                    endTotalMinutes,   // 全局結束時間（分鐘）
+                                    timeDisplay 
+                                });
+                            }
+                            newBookings.push(...bookingsForReservation);
+                        }
+                    }
+                }
+
+                setBookings(newBookings);
+                setReportDate(dateFound || new Date().toISOString().split('T')[0]);
+                setErrorMsg("");
+            };
+
+            // --- 預約管理邏輯 ---
+            
+            // 點擊半小時網格觸發新增預約
+            const openAddModal = (courtId, hour, minute) => {
+                setAddModalState({ isOpen: true, courtId, hour, minute });
+            };
+
+            // 新增預約邏輯 (支援半小時 & 視覺化所需的總分鐘數)
+            const handleAddBooking = (formData) => {
+                const { customerName, notes, duration, startMinute } = formData;
+                const { courtId, hour: baseHour } = addModalState;
+                const courtConfig = COURTS.find(c => c.id === courtId);
+                
+                // 計算全局分鐘數
+                const startTotalMinutes = baseHour * 60 + startMinute;
+                const endTotalMinutes = startTotalMinutes + (duration * 60);
+                
+                const timeDisplay = `${formatTime(startTotalMinutes)} - ${formatTime(endTotalMinutes)}`;
+
+                const newBookingsList = [];
+                
+                // *** 新增穩定預約 ID (手動新增) ***
+                const uniqueReservationId = `new-${Math.random().toString(36).substr(2, 9)}`; 
+
+                // 檢查預約所佔用的半小時網格 (Grid Slot)
+                const startGridIndex = Math.floor(startTotalMinutes / 30) - (6 * 2);
+                const endGridIndex = Math.ceil(endTotalMinutes / 30) - (6 * 2);
+
+                for (let idx = startGridIndex; idx < endGridIndex; idx++) {
+                    const gridSlot = HALF_HOURS.find(h => h.index === idx);
+                    if (!gridSlot) continue; 
+
+                    newBookingsList.push({
+                        id: Math.random().toString(36).substr(2, 9), // Slot ID
+                        reservationId: uniqueReservationId, // <-- 穩定 ID
+                        courtId,
+                        courtType: courtConfig.type,
+                        hour: gridSlot.hour, 
+                        minute: gridSlot.minute,
+                        gridIndex: idx,
+                        customerName,
+                        notes,
+                        customerPhone: '', // 手動新增預約沒有電話資訊
+                        rawProduct: '現場新增預約',
+                        isCoachProduct: false, 
+                        isNew: customerName.toUpperCase() !== BLOCKOUT_KEYWORD, 
+                        isDeleted: false,
+                        startTotalMinutes, 
+                        endTotalMinutes,   
+                        timeDisplay 
+                    });
+                }
+
+                setBookings(prev => [...prev, ...newBookingsList]);
+            };
+
+            const openDeleteModal = (e, booking) => {
+                e.stopPropagation();
+                setDeleteModalState({ isOpen: true, booking });
+            };
+
+            // 確保所有屬於同一預約時間範圍的時段都被標記/處理 (現在使用 reservationId)
+            const getReservationGroupIds = (bookingId) => {
+                const targetBooking = bookings.find(b => b.id === bookingId);
+                if (!targetBooking || !targetBooking.reservationId) return [];
+                
+                // 使用 reservationId 找出所有相關的 slots ID
+                const reservationId = targetBooking.reservationId; 
+                
+                return bookings
+                    .filter(b => b.reservationId === reservationId)
+                    .map(b => b.id);
+            };
+
+            const handleDeleteBooking = (id) => {
+                const idsToDelete = getReservationGroupIds(id);
+                
+                setBookings(prev => {
+                    const targetBooking = prev.find(b => b.id === id);
+                    if (!targetBooking) return prev;
+
+                    // 如果是新預約或 BLOCKOUT，直接從狀態中移除 (不需要標記刪除)
+                    if (targetBooking.isNew || targetBooking.customerName.toUpperCase() === BLOCKOUT_KEYWORD) {
+                        return prev.filter(b => !idsToDelete.includes(b.id));
+                    }
+
+                    // 如果是 CSV 匯入的原始預約，則標記所有相關時段為刪除
+                    return prev.map(b => {
+                        if (idsToDelete.includes(b.id)) {
+                            return { ...b, isDeleted: true };
+                        }
+                        return b;
+                    });
+                });
+            };
+
+            const handleRestoreBooking = (id) => {
+                const idsToRestore = getReservationGroupIds(id);
+
+                setBookings(prev => prev.map(b => {
+                    if (idsToRestore.includes(b.id)) {
+                        return { ...b, isDeleted: false };
+                    }
+                    return b;
+                }));
+            };
+
+            // --- 拖曳功能邏輯 ---
+            // 拖曳邏輯已更新，以整個預約時段組的 reservationId 為單位進行平移
+            const handleDragStart = (e, booking) => {
+                if (booking.isDeleted || booking.customerName.toUpperCase() === BLOCKOUT_KEYWORD) {
+                    e.preventDefault();
+                    return;
+                }
+                // 傳遞穩定預約 ID
+                e.dataTransfer.setData("reservationId", booking.reservationId); 
+                e.dataTransfer.effectAllowed = "move";
+            };
+
+            const handleDragOver = (e, courtId, gridIndex) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setDragOverCell(`${courtId}-${gridIndex}`);
+            };
+
+            const handleDragLeave = (e) => {
+                setDragOverCell(null);
+            };
+
+            const handleDrop = (e, targetCourtId, targetGridIndex) => {
+                e.preventDefault();
+                setDragOverCell(null);
+                const reservationId = e.dataTransfer.getData("reservationId"); // 取得穩定 ID
+                
+                if (reservationId) {
+                    const originalBookings = bookings.filter(b => b.reservationId === reservationId); // 找到整個預約區塊
+                    
+                    if (originalBookings.length === 0) return;
+
+                    // 使用第一個 booking 作為基礎
+                    const baseBooking = originalBookings[0];
+                    
+                    // 找出原始預約的開始半小時網格索引
+                    const originalStartGridIndex = Math.min(...originalBookings.map(b => b.gridIndex));
+                    const gridDifference = targetGridIndex - originalStartGridIndex;
+                    
+                    const targetCourt = COURTS.find(c => c.id === targetCourtId);
+                    const newCourtType = targetCourt ? targetCourt.type : baseBooking.courtType;
+
+                    const durationInMinutes = baseBooking.endTotalMinutes - baseBooking.startTotalMinutes;
+                    
+                    // 計算新的開始分鐘數 (以 30 分鐘為單位平移)
+                    const newStartTotalMinutes = baseBooking.startTotalMinutes + (gridDifference * 30);
+                    const newEndTotalMinutes = newStartTotalMinutes + durationInMinutes;
+                    
+                    const newTimeDisplay = `${formatTime(newStartTotalMinutes)} - ${formatTime(newEndTotalMinutes)}`;
+
+                    const updatedBookings = [];
+                    
+                    // 重新計算每個半小時網格
+                    const newStartGridIndex = Math.floor(newStartTotalMinutes / 30) - (6 * 2);
+                    const newEndGridIndex = Math.ceil(newEndTotalMinutes / 30) - (6 * 2);
+
+                    for (let idx = newStartGridIndex; idx < newEndGridIndex; idx++) {
+                        const gridSlot = HALF_HOURS.find(h => h.index === idx);
+                        if (!gridSlot || newEndTotalMinutes > (22 * 60)) continue; // 超出 22:00 範圍則不更新
+                        
+                        updatedBookings.push({
+                            ...baseBooking,
+                            id: Math.random().toString(36).substr(2, 9), // Slot ID (New for React key)
+                            reservationId: reservationId, // <-- 保持原本的穩定 ID
+                            courtId: targetCourtId,
+                            courtType: newCourtType,
+                            hour: gridSlot.hour, 
+                            minute: gridSlot.minute,
+                            gridIndex: idx,
+                            startTotalMinutes: newStartTotalMinutes,
+                            endTotalMinutes: newEndTotalMinutes,
+                            timeDisplay: newTimeDisplay
+                        });
+                    }
+
+                    // 篩選出所有屬於該 reservationId 的舊預約，並替換成新的
+                    setBookings(prevBookings => {
+                        const filtered = prevBookings.filter(b => b.reservationId !== reservationId);
+                        // 如果 updatedBookings 有內容 (沒有拖曳到無效時段) 則加入
+                        return [...filtered, ...updatedBookings];
+                    });
+                }
+            };
+
+            // 取得單個半小時網格內的預約
+            const getBookingsForSlot = (courtId, hour, minute) => {
+                return bookings.filter(b => b.courtId === courtId && b.hour === hour && b.minute === minute);
+            };
+
+            // 統計邏輯 (已調整為半小時單位)
+            const stats = useMemo(() => {
+                const activeBookings = bookings.filter(b => !b.isDeleted && b.customerName.toUpperCase() !== BLOCKOUT_KEYWORD);
+                
+                const uniqueReservations = activeBookings.reduce((acc, booking) => {
+                    // 使用 reservationId 來計算獨立預約組數
+                    if (!acc.has(booking.reservationId)) {
+                        acc.set(booking.reservationId, booking);
+                    }
+                    return acc;
+                }, new Map());
+
+                // 教練場 (coach, coach-blue, park)
+                const coachCourtIds = COURTS.filter(c => ['coach', 'coach-blue', 'park'].includes(c.type)).map(c => c.id);
+                const totalCoachCourts = coachCourtIds.length;
+                const coachCapacity = totalCoachCourts * HALF_HOURS.length * 2; // 每半小時有兩個分割單位
+                
+                let coachUsageSlots = 0;
+                // 由於教練場有左右分割，需要計算每個半小時格內的獨立預約數量
+                HALF_HOURS.forEach(gridSlot => {
+                    coachCourtIds.forEach(cId => {
+                        const halfHourBookings = activeBookings.filter(b => b.courtId === cId && b.gridIndex === gridSlot.index);
+                        // 計算佔用數 (上限為 2)
+                        coachUsageSlots += Math.min(2, halfHourBookings.length);
+                    });
+                });
+                const coachRate = coachCapacity > 0 ? Math.round((coachUsageSlots / coachCapacity) * 100) : 0;
+                
+                // 一般民眾場 (public)
+                const publicCourtIds = COURTS.filter(c => c.type === 'public').map(c => c.id);
+                const totalPublicCourts = publicCourtIds.length;
+                const publicCapacitySlots = totalPublicCourts * HALF_HOURS.length; // 每半小時只有一個單位
+
+                let publicUsageSlots = 0;
+                HALF_HOURS.forEach(gridSlot => {
+                    publicCourtIds.forEach(cId => {
+                        const halfHourBookings = activeBookings.filter(b => b.courtId === cId && b.gridIndex === gridSlot.index);
+                        // 計算佔用數 (上限為 1)
+                        if (halfHourBookings.length > 0) publicUsageSlots++;
+                    });
+                });
+
+                const publicRate = publicCapacitySlots > 0 ? Math.round((publicUsageSlots / publicCapacitySlots) * 100) : 0;
+
+                return {
+                    coachUsage: coachUsageSlots / 2, // 換算成時數
+                    coachCapacity: coachCapacity / 2, // 換算成時數
+                    coachRate,
+                    publicOccupiedSlots: publicUsageSlots / 2, // 換算成時數
+                    publicCapacity: publicCapacitySlots / 2, // 換算成時數
+                    publicRate,
+                    totalBookings: uniqueReservations.size
+                };
+            }, [bookings]);
+
+            return (
+                <div className="min-h-screen bg-gray-50 pb-10">
+                    {/* Modals */}
+                    <AddBookingModal 
+                        isOpen={addModalState.isOpen}
+                        onClose={() => setAddModalState({ ...addModalState, isOpen: false })}
+                        onSave={handleAddBooking}
+                        initialData={addModalState}
+                    />
+                    <DeleteBookingModal 
+                        isOpen={deleteModalState.isOpen}
+                        onClose={() => setDeleteModalState({ ...deleteModalState, isOpen: false })}
+                        onDelete={handleDeleteBooking}
+                        onRestore={handleRestoreBooking}
+                        booking={deleteModalState.booking}
+                    />
+
+                    <div className="bg-white shadow-sm border-b border-gray-200 print-hide">
+                        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex flex-col md:flex-row justify-between items-center gap-4">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-green-400 text-white p-2 rounded-lg">
+                                    <i className="fas fa-tennis-ball text-xl"></i>
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-bold text-gray-900">西北國際網球場地調度狀態</h1>
+                                    <p className="text-sm text-gray-500">臺中市國際網球中心｜臺中公園網球場</p>
+                                </div>
+                            </div>
+
+                            <img src="https://northwest-sports.com/assets/logo-463d63dd60adb1ff2bed1cf4337d26db65b22e6c6f8708817adb0c1deb419fcd.png" alt="Northwest Sports Logo" className="h-12 mb-1"/>
+
+                            <div className="flex items-center gap-3">
+                                <label className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition shadow-sm flex items-center gap-2">
+                                    <i className="fas fa-upload"></i>
+                                    <span>上傳 CSV 檔案</span>
+                                    <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+                                </label>
+                                <button 
+                                    onClick={() => window.print()}
+                                    className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg transition border border-gray-300 flex items-center gap-2">
+                                    <i className="fas fa-print"></i>
+                                    列印
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {errorMsg && (
+                        <div className="max-w-7xl mx-auto mt-4 px-4">
+                            <div className="bg-red-50 text-red-700 p-4 rounded-lg border border-red-200">
+                                <i className="fas fa-exclamation-circle mr-2"></i>
+                                {errorMsg}
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="max-w-[98%] mx-auto mt-6 print-container">
+                        {/* 統計儀表板區塊 */}
+                        <div className="mb-6 grid grid-cols-1 md:grid-cols-4 gap-4 print-hide">
+                            {/* 1. 日期卡 */}
+                            <div className="bg-white px-4 py-3 rounded-lg shadow-sm border border-gray-200">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">報表日期</span>
+                                <div className="text-lg font-bold text-gray-900">{reportDate}</div>
+                                <div className="text-xs text-gray-400 mt-1">有效預約組數: {stats.totalBookings}</div>
+                            </div>
+
+                            {/* 2. 教練場使用率 (含公園場) */}
+                            <div className="bg-white px-4 py-3 rounded-lg shadow-sm border border-l-4 border-l-blue-900 border-y border-r border-gray-200">
+                                <div className="flex justify-between items-start">
+                                    <span className="text-xs font-semibold text-blue-900 uppercase tracking-wider">教練/公園場地使用率</span>
+                                    <i className="fas fa-chalkboard-teacher text-blue-300"></i>
+                                </div>
+                                <div className="flex items-baseline gap-2 mt-1">
+                                    <span className="text-2xl font-bold text-blue-900">{stats.coachRate}%</span>
+                                    <span className="text-xs text-gray-500">({stats.coachUsage} / {stats.coachCapacity} 小時)</span>
+                                </div>
+                                <div className="text-[10px] text-gray-400 mt-1">教練場 + 公園場地 (每半小時兩人份容量)</div>
+                            </div>
+
+                            {/* 3. 民眾場使用率 */}
+                            <div className="bg-white px-4 py-3 rounded-lg shadow-sm border border-l-4 border-l-green-400 border-y border-r border-gray-200">
+                                <div className="flex justify-between items-start">
+                                    <span className="text-xs font-semibold text-green-700 uppercase tracking-wider">民眾場地使用率 (小時)</span>
+                                    <i className="fas fa-users text-green-300"></i>
+                                </div>
+                                <div className="flex items-baseline gap-2 mt-1">
+                                    <span className="text-2xl font-bold text-green-700">{stats.publicRate}%</span>
+                                    <span className="text-xs text-gray-500">({stats.publicOccupiedSlots} / {stats.publicCapacity} 小時)</span>
+                                </div>
+                                <div className="text-[10px] text-gray-400 mt-1">本館民眾場地 (每半小時一人份容量)</div>
+                            </div>
+
+                            {/* 4. 操作說明 */}
+                            <div className="bg-gray-50 px-4 py-3 rounded-lg border border-gray-200">
+                                <div className="text-sm font-bold text-gray-700 mb-2">資料庫同步指引</div>
+                                <div className="flex flex-col gap-1 text-xs">
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-3 h-3 bg-yellow-400 rounded-sm inline-block"></span>
+                                        <span>黃色：新增訂單 (請 Key 進資料庫)</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-3 h-3 bg-red-400 rounded-sm inline-block relative overflow-hidden">
+                                            <div className="absolute top-1/2 left-0 w-full h-[1px] bg-white transform -translate-y-1/2"></div>
+                                        </span>
+                                        <span>紅色刪除線：刪除訂單 (請從資料庫移除)</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* 圖例 */}
+                        <div className="flex items-center gap-4 mb-2 text-sm text-gray-600 px-2 flex-wrap print-hide">
+                            <div className="flex items-center gap-2">
+                                <div className="w-3 h-3 rounded-full bg-blue-900"></div>
+                                <span>本館教練場 (深藍)</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <div className="w-3 h-3 rounded-full bg-blue-500"></div>
+                                <span>西北教練場 (亮藍)</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <div className="w-3 h-3 rounded-full bg-red-700"></div>
+                                <span>公園場 (紅土)</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <div className="w-3 h-3 rounded-full bg-green-400"></div>
+                                <span>民眾場 (綠)</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <div className="w-3 h-3 rounded-full bg-gray-400"></div>
+                                <span>[BLOCKOUT] 場地封鎖</span>
+                            </div>
+                            <div className="border-l pl-4 text-gray-500 text-xs flex gap-3 ml-auto">
+                                <span><i className="fas fa-plus-circle mr-1 text-gray-400"></i>點擊空白處新增/封鎖</span>
+                                <span><i className="fas fa-arrows-alt-h mr-1 text-gray-400"></i>拖曳預約卡調度場地/時間</span>
+                            </div>
+                        </div>
+
+                        {/* 核心調度表 */}
+                        <div className="bg-white shadow-lg rounded-xl overflow-hidden border border-gray-200">
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left border-collapse table-fixed">
+                                    <thead>
+                                        <tr>
+                                            <th className="p-2 bg-gray-800 text-white font-medium sticky left-0 z-20 w-24 text-center border-b border-gray-700">
+                                                <span className="text-xs block">時間</span>
+                                            </th>
+                                            {COURTS.map(court => (
+                                                <th key={court.id} className={`
+                                                    p-2 font-bold border-b border-r border-gray-200 text-center min-w-[100px] w-32
+                                                    ${getCourtStyles(court.type, true)}
+                                                `}>
+                                                    <div className="flex flex-col">
+                                                        <span>{court.name}</span>
+                                                        <span className="text-[9px] font-normal opacity-75">
+                                                            {court.type === 'coach' || court.type === 'coach-blue' ? '本館教練場' : (court.type === 'park' ? '公園紅土場' : '民眾開放')}
+                                                        </span>
+                                                    </div>
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {HALF_HOURS.map(({ hour, minute, index: gridIndex }) => {
+                                            const isHourStart = minute === 0;
+
+                                            return (
+                                                <tr key={gridIndex} className="hover:bg-gray-50">
+                                                    {/* 時間欄位修正：強制顯示 HH:MM */}
+                                                    <td 
+                                                        className={`p-1 bg-gray-50 border-b border-r border-gray-200 font-bold text-center sticky left-0 z-10 text-gray-600 select-none h-10 
+                                                            ${isHourStart ? 'border-t-2 border-t-gray-300' : 'border-t border-t-gray-200'}`}
+                                                    >
+                                                        <div className="text-center text-xs leading-tight">
+                                                            <span className="font-bold text-gray-800 block">
+                                                                {hour.toString().padStart(2, '0')}:{minute.toString().padStart(2, '0')}
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    {COURTS.map(court => {
+                                                        const slotBookings = getBookingsForSlot(court.id, hour, minute);
+                                                        const cellId = `${court.id}-${gridIndex}`;
+                                                        const isDragOver = dragOverCell === cellId;
+                                                        
+                                                        // 教練場和公園場 (可分割)
+                                                        const isSplittable = ['coach', 'coach-blue', 'park'].includes(court.type);
+                                                        
+                                                        return (
+                                                            <td 
+                                                                key={cellId} 
+                                                                onClick={() => openAddModal(court.id, hour, minute)}
+                                                                onDragOver={(e) => handleDragOver(e, court.id, gridIndex)}
+                                                                onDragLeave={handleDragLeave}
+                                                                onDrop={(e) => handleDrop(e, court.id, gridIndex)}
+                                                                className={`
+                                                                    border-b border-r border-gray-200 h-10 align-top relative p-0 transition-colors cursor-pointer
+                                                                    ${isDragOver ? 'drag-over' : ''}
+                                                                    ${isHourStart ? 'border-t-2 border-t-gray-300' : 'border-t border-t-gray-200'}
+                                                                    hover:bg-gray-100
+                                                                    ${court.type === 'park' ? 'bg-red-50/50' : ''}
+                                                                `}>
+                                                                
+                                                                <div className={`w-full h-full flex ${isSplittable ? '' : 'justify-center items-center'}`}>
+                                                                    {/* 判斷是否為可分割場地，進行左右分割 */}
+                                                                    {isSplittable ? (
+                                                                        <>
+                                                                            {/* 左半場 */}
+                                                                            <div className="flex-1 h-full relative" onClick={(e) => e.stopPropagation()}>
+                                                                                {slotBookings[0] && (
+                                                                                    <BookingCard booking={slotBookings[0]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} />
+                                                                                )}
+                                                                            </div>
+                                                                            {/* 中間分割線 */}
+                                                                            <div className="w-px h-full bg-gray-200 pointer-events-none"></div>
+                                                                            {/* 右半場 */}
+                                                                            <div className="flex-1 h-full relative" onClick={(e) => e.stopPropagation()}>
+                                                                                {slotBookings[1] && (
+                                                                                    <BookingCard booking={slotBookings[1]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} />
+                                                                                )}
+                                                                            </div>
+                                                                        </>
+                                                                    ) : (
+                                                                        /* 不可分割場地 (民眾場) */
+                                                                        <div className="w-full h-full relative" onClick={(e) => e.stopPropagation()}>
+                                                                            {slotBookings[0] && (
+                                                                                <BookingCard booking={slotBookings[0]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} isFullWidth={true} />
+                                                                            )}
+                                                                            {/* 如果有多餘的預約，顯示警示 */}
+                                                                            {slotBookings.length > 1 && (
+                                                                                <div className="absolute inset-0 bg-red-500/50 text-white text-[8px] flex items-center justify-center p-0.5" title="錯誤: 民眾場地重複預約">
+                                                                                    重複 ({slotBookings.length})
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                    
+                                                                    {/* 顯示 + 號提示 */}
+                                                                    {slotBookings.length === 0 && (
+                                                                        <div className="absolute inset-0 w-full h-full flex items-center justify-center group transition-colors">
+                                                                            <span className="hidden group-hover:inline text-gray-400 text-xs">
+                                                                                <i className="fas fa-plus"></i>
+                                                                            </span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                                </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 子元件: BookingCard (用於教練場左右分割) ---
+        const BookingCard = ({ booking, openDeleteModal, handleDragStart, isFullWidth = false }) => {
+            const bookingClassName = getBookingStyles(booking);
+            const isBlockout = booking.customerName.toUpperCase() === BLOCKOUT_KEYWORD;
+            
+            // 處理教練場的顏色特殊處理 (深海軍藍)
+            let finalBookingClassName = bookingClassName;
+            if (booking.courtType === 'coach' && !booking.isNew && !booking.isDeleted && !isBlockout) {
+                 finalBookingClassName = `bg-[#002050] border-blue-400 text-white hover:bg-blue-900 shadow-sm`;
+            } else if (booking.courtType === 'park' && !booking.isNew && !booking.isDeleted && !isBlockout) {
+                 finalBookingClassName = `bg-red-200 border-red-500 text-red-900 hover:bg-red-300 shadow-sm`;
+            }
+
+
+            return (
+                <div 
+                    draggable={!booking.isDeleted && !isBlockout} 
+                    onClick={(e) => openDeleteModal(e, booking)}
+                    onDragStart={(e) => handleDragStart(e, booking)}
+                    className={`
+                        draggable-item h-full w-full flex flex-col justify-center items-center text-center p-0.5 rounded-lg text-xs
+                        ${finalBookingClassName}
+                        transition-all relative group overflow-hidden
+                        ${isFullWidth ? 'absolute inset-0 m-0.5' : 'm-0.5'}
+                    `}
+                    title={`預約：${booking.timeDisplay}\n客戶：${booking.customerName}\n電話：${booking.customerPhone}\n備註：${booking.notes}`}
+                >
+                    {/* 標記 Badge */}
+                    {booking.isNew && (
+                        <div className="absolute top-0 right-0 bg-yellow-500 text-white text-[7px] px-1 rounded-bl font-bold">新</div>
+                    )}
+                    {booking.isDeleted && (
+                        <div className="absolute top-0 right-0 bg-red-500 text-white text-[7px] px-1 rounded-bl font-bold">刪</div>
+                    )}
+                    {isBlockout && (
+                        <div className="absolute top-0 right-0 bg-gray-500 text-white text-[7px] px-1 rounded-bl font-bold">封鎖</div>
+                    )}
+
+                    <div className="font-bold text-[9px] leading-tight line-clamp-1 break-all w-full pointer-events-none">
+                        {isBlockout ? 'BLOCKOUT' : booking.customerName}
+                    </div>
+                    
+                    {booking.notes && (
+                        <div className="text-[7px] px-0.5 rounded mt-0.5 font-normal pointer-events-none line-clamp-1 bg-white/60 text-gray-800">
+                            {booking.notes}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
