@@ -129,6 +129,20 @@
             return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
         };
 
+        // 輔助函式：取得中文星期幾 (e.g., "星期一")
+        const getChineseDayOfWeek = (dateStr) => {
+            // 將 "YYYY年MM月DD日" 轉換為 "YYYY/MM/DD"
+            const normalized = dateStr.replace(/年|月/g, '/').replace(/日/g, '');
+            const date = new Date(normalized);
+            if (isNaN(date.getTime())) return '';
+
+            const dayIndex = date.getDay();
+            const days = ['日', '一', '二', '三', '四', '五', '六'];
+            
+            return `星期${days[dayIndex]}`;
+        };
+
+
         // --- Modal 元件: 新增預約 (支援半小時) ---
         const AddBookingModal = ({ isOpen, onClose, onSave, initialData }) => {
             if (!isOpen) return null;
@@ -149,7 +163,8 @@
             const handleSubmit = (e) => {
                 e.preventDefault();
                 if (!formData.customerName.trim()) {
-                    alert("請輸入消費者名稱或輸入 BLOCKOUT 進行場地封鎖");
+                    // 使用 alert 是為了符合輸出規範，在實際應用中應使用客製化 Modal
+                    alert("請輸入消費者名稱或輸入 BLOCKOUT 進行場地封鎖"); 
                     return;
                 }
                 onSave(formData);
@@ -421,7 +436,8 @@
                 // 將 "2025年11月24日" 轉換為 "2025/11/24"
                 const normalized = dateStr.replace(/年|月/g, '/').replace(/日/g, '');
                 const date = new Date(normalized);
-                return isNaN(date) ? null : date;
+                // 使用 getTime() 檢查日期是否有效
+                return isNaN(date.getTime()) ? null : date;
             };
 
 
@@ -924,7 +940,7 @@
                     <div className="max-w-[98%] mx-auto mt-6 print-container">
                         {/* 統計儀表板區塊 */}
                         <div className="mb-6 grid grid-cols-1 md:grid-cols-4 gap-4 print-hide">
-                            {/* 1. 日期選擇器 / 總時數 (修正為顯示時數) */}
+                            {/* 1. 日期選擇器 / 總時數 (修正為顯示時數與星期幾) */}
                             <div className="bg-white px-4 py-3 rounded-lg shadow-sm border border-gray-200 col-span-1">
                                 <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider block mb-2">調度日期</span>
                                 <select
@@ -937,7 +953,9 @@
                                         <option value="">請先上傳 CSV</option>
                                     ) : (
                                         allDates.map(date => (
-                                            <option key={date} value={date}>{date}</option>
+                                            <option key={date} value={date}>
+                                                {date} ({getChineseDayOfWeek(date)})
+                                            </option>
                                         ))
                                     )}
                                 </select>
@@ -1071,10 +1089,89 @@
                                                         // 教練場和公園場 (可分割)
                                                         const isSplittable = ['coach', 'coach-blue', 'park'].includes(court.type);
                                                         
+                                                        const hasBookings = slotBookings.length > 0;
+                                                        // 只有可分割的場地，才使用 flex 佈局
+                                                        const isSplitView = isSplittable; 
+
+                                                        let cellContent;
+                                                        let tdClickHandler = isSplittable ? undefined : (hasBookings ? undefined : () => openAddModal(court.id, hour, minute));
+                                                        
+                                                        if (isSplittable) {
+                                                            // *** 新的邏輯：教練場/公園場始終顯示兩個半格 ***
+                                                            cellContent = (
+                                                                <>
+                                                                    {/* Left Half (Slot 1) */}
+                                                                    <div 
+                                                                        className="flex-1 h-full relative group" 
+                                                                        // 點擊邏輯：如果已有預約，則點擊卡片；如果沒有，點擊空格新增
+                                                                        onClick={slotBookings[0] ? (e) => e.stopPropagation() : () => openAddModal(court.id, hour, minute)}
+                                                                    >
+                                                                        {slotBookings[0] ? (
+                                                                            <BookingCard booking={slotBookings[0]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} />
+                                                                        ) : (
+                                                                            <span className="hidden group-hover:inline text-gray-400 text-xs absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2"><i className="fas fa-plus"></i></span>
+                                                                        )}
+                                                                    </div>
+                                                                    {/* Divider */}
+                                                                    <div className="w-px h-full bg-gray-200 pointer-events-none"></div>
+                                                                    {/* Right Half (Slot 2) */}
+                                                                    <div 
+                                                                        className="flex-1 h-full relative group" 
+                                                                        // 點擊邏輯：如果已有預約，則點擊卡片；如果沒有，點擊空格新增 (即使 slotBookings[0] 存在，slotBookings[1] 不存在，這裡也是可點擊的)
+                                                                        onClick={slotBookings[1] ? (e) => e.stopPropagation() : () => openAddModal(court.id, hour, minute)}
+                                                                    >
+                                                                        {slotBookings[1] ? (
+                                                                            <BookingCard booking={slotBookings[1]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} />
+                                                                        ) : (
+                                                                            // 只有當預約少於 2 個時才顯示 +
+                                                                            <span className="hidden group-hover:inline text-gray-400 text-xs absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2"><i className="fas fa-plus"></i></span>
+                                                                        )}
+                                                                    </div>
+                                                                    {/* Overflow check for > 2 bookings */}
+                                                                    {slotBookings.length > 2 && (
+                                                                        <div className="absolute inset-0 bg-red-500/50 text-white text-[8px] flex items-center justify-center p-0.5 z-10" title="錯誤: 場地超過容納人數">
+                                                                            溢出 ({slotBookings.length - 2} +)
+                                                                        </div>
+                                                                    )}
+                                                                </>
+                                                            );
+                                                            // TD 本身不處理點擊
+                                                            tdClickHandler = undefined;
+
+                                                        } else {
+                                                            // Non-Splittable (Public Courts)
+                                                            if (hasBookings) {
+                                                                cellContent = (
+                                                                    <div className="w-full h-full relative" onClick={(e) => e.stopPropagation()}>
+                                                                        <BookingCard booking={slotBookings[0]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} isFullWidth={true} />
+                                                                        {slotBookings.length > 1 && (
+                                                                            <div className="absolute inset-0 bg-red-500/50 text-white text-[8px] flex items-center justify-center p-0.5" title="錯誤: 民眾場地重複預約">
+                                                                                重複 ({slotBookings.length})
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                                // TD 本身不處理點擊
+                                                                tdClickHandler = undefined;
+                                                            } else {
+                                                                // Empty Public Slot: Show Plus Sign (TD handles click)
+                                                                cellContent = (
+                                                                    <div className="absolute inset-0 w-full h-full flex items-center justify-center group transition-colors">
+                                                                        <span className="hidden group-hover:inline text-gray-400 text-xs">
+                                                                            <i className="fas fa-plus"></i>
+                                                                        </span>
+                                                                    </div>
+                                                                );
+                                                                // TD 處理點擊
+                                                                tdClickHandler = () => openAddModal(court.id, hour, minute);
+                                                            }
+                                                        }
+                                                        
                                                         return (
                                                             <td 
                                                                 key={cellId} 
-                                                                onClick={() => openAddModal(court.id, hour, minute)}
+                                                                // 只有在非分割場地且無預約時，才在 TD 層級處理點擊
+                                                                onClick={tdClickHandler}
                                                                 onDragOver={(e) => handleDragOver(e, court.id, gridIndex)}
                                                                 onDragLeave={handleDragLeave}
                                                                 onDrop={(e) => handleDrop(e, court.id, gridIndex)}
@@ -1086,48 +1183,8 @@
                                                                     ${court.type === 'park' ? 'bg-amber-50/50' : ''}
                                                                 `}>
                                                                 
-                                                                <div className={`w-full h-full flex ${isSplittable ? '' : 'justify-center items-center'}`}>
-                                                                    {/* 判斷是否為可分割場地，進行左右分割 */}
-                                                                    {isSplittable ? (
-                                                                        <>
-                                                                            {/* 左半場 */}
-                                                                            <div className="flex-1 h-full relative" onClick={(e) => e.stopPropagation()}>
-                                                                                {slotBookings[0] && (
-                                                                                    <BookingCard booking={slotBookings[0]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} />
-                                                                                )}
-                                                                            </div>
-                                                                            {/* 中間分割線 */}
-                                                                            <div className="w-px h-full bg-gray-200 pointer-events-none"></div>
-                                                                            {/* 右半場 */}
-                                                                            <div className="flex-1 h-full relative" onClick={(e) => e.stopPropagation()}>
-                                                                                {slotBookings[1] && (
-                                                                                    <BookingCard booking={slotBookings[1]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} />
-                                                                                )}
-                                                                            </div>
-                                                                        </>
-                                                                    ) : (
-                                                                        /* 不可分割場地 (民眾場) */
-                                                                        <div className="w-full h-full relative" onClick={(e) => e.stopPropagation()}>
-                                                                            {slotBookings[0] && (
-                                                                                <BookingCard booking={slotBookings[0]} openDeleteModal={openDeleteModal} handleDragStart={handleDragStart} isFullWidth={true} />
-                                                                            )}
-                                                                            {/* 如果有多餘的預約，顯示警示 */}
-                                                                            {slotBookings.length > 1 && (
-                                                                                <div className="absolute inset-0 bg-red-500/50 text-white text-[8px] flex items-center justify-center p-0.5" title="錯誤: 民眾場地重複預約">
-                                                                                    重複 ({slotBookings.length})
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    )}
-                                                                    
-                                                                    {/* 顯示 + 號提示 */}
-                                                                    {slotBookings.length === 0 && (
-                                                                        <div className="absolute inset-0 w-full h-full flex items-center justify-center group transition-colors">
-                                                                            <span className="hidden group-hover:inline text-gray-400 text-xs">
-                                                                                <i className="fas fa-plus"></i>
-                                                                            </span>
-                                                                        </div>
-                                                                    )}
+                                                                <div className={`w-full h-full flex ${isSplitView ? '' : 'justify-center items-center'}`}>
+                                                                    {cellContent}
                                                                 </div>
                                                                 </td>
                                                         );
