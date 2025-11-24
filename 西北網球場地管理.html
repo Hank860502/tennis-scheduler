@@ -6,6 +6,7 @@
     <title>西北國際網球場地調度儀表板</title>
     <!-- 新增 Favicon 連結 -->
     <link rel="icon" type="image/x-icon" href="https://northwest-sports.com/assets/sm-logo2-8e0494da68fe896adb688b0ca1a9217875b9e205a0bb73b01af606096d3bcf0f.png">
+    
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -18,8 +19,8 @@
         @media print {
             .print-hide { display: none; }
             .print-container { width: 100%; max-width: none; padding: 0; }
-            body { -webkit-print-color-adjust: exact; }
-            * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+            body { -webkit-print-adjust: exact; print-color-adjust: exact; }
+            * { -webkit-print-adjust: exact !important; print-color-adjust: exact !important; }
         }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: #f1f1f1; }
@@ -34,6 +35,13 @@
             border: 2px dashed #16a34a !important; 
             z-index: 5;
             box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+
+        /* 修正時間欄位不換行 */
+        .time-cell-content {
+            white-space: nowrap; /* 確保內容不換行 */
+            display: flex;
+            justify-content: center;
         }
     </style>
 </head>
@@ -84,14 +92,14 @@
                     return isHeader 
                         ? 'bg-blue-600 text-white border-blue-400' 
                         : 'bg-blue-50 border-blue-200 text-blue-800 hover:bg-blue-100';
-                case 'public': // 5-9, central (綠色系)
+                case 'public': // 5-9, central (綠色系, 使用者指定為 400 級)
                     return isHeader 
                         ? 'bg-green-400 text-white border-green-400' 
                         : 'bg-green-50 border-green-200 text-green-800 hover:bg-green-100';
-                case 'park': // park1, park2 (紅土色系 - 赤陶色)
-                    const clayColorHeader = 'bg-red-700 text-white border-red-500';
-                    const clayColorBooking = 'bg-red-100 border-red-300 text-red-900 hover:bg-red-200';
-                    return isHeader ? clayColorHeader : clayColorBooking;
+                case 'park': // park1, park2 (橘紅色系 - 琥珀色 Amber)
+                    const parkHeaderColor = 'bg-amber-700 text-white border-amber-500'; // 較深的橘紅
+                    const parkBookingColor = 'bg-amber-100 border-amber-300 text-amber-900 hover:bg-amber-200'; // 較淺的橘紅
+                    return isHeader ? parkHeaderColor : parkBookingColor;
                 default:
                     return isHeader ? 'bg-gray-700 text-white' : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100';
             }
@@ -329,7 +337,8 @@
         const App = () => {
             const [bookings, setBookings] = useState([]);
             const [fileName, setFileName] = useState("");
-            const [reportDate, setReportDate] = useState("");
+            const [allDates, setAllDates] = useState([]); // 所有 CSV 內的日期
+            const [selectedDate, setSelectedDate] = useState(""); // 當前選定的日期
             const [errorMsg, setErrorMsg] = useState("");
             const [dragOverCell, setDragOverCell] = useState(null); 
             
@@ -338,10 +347,11 @@
             const [deleteModalState, setDeleteModalState] = useState({ isOpen: false, booking: null });
 
             useEffect(() => {
-                if (!reportDate) {
-                    setReportDate(new Date().toISOString().split('T')[0]);
+                if (!selectedDate && allDates.length > 0) {
+                    // 如果沒有選擇日期，則自動選取 CSV 中的第一個日期
+                    setSelectedDate(allDates[0]);
                 }
-            }, [reportDate]);
+            }, [selectedDate, allDates]);
 
             const handleFileUpload = (event) => {
                 const file = event.target.files[0];
@@ -360,7 +370,7 @@
             };
 
             const parseCSVContent = (text) => {
-                // 這是 V7.0 的核心解析邏輯，用於處理複雜的 CSV 格式（包含換行和引號）
+                // 這是用於處理複雜 CSV 格式（包含換行和引號）的核心解析邏輯
                 const rows = [];
                 let currentRow = [];
                 let currentVal = '';
@@ -404,8 +414,18 @@
                 }
                 return rows;
             };
+            
+            // 輔助函式：將日期字串轉換為可比較的 Date 物件 (用於排序)
+            const parseDateString = (dateStr) => {
+                if (!dateStr) return null;
+                // 將 "2025年11月24日" 轉換為 "2025/11/24"
+                const normalized = dateStr.replace(/年|月/g, '/').replace(/日/g, '');
+                const date = new Date(normalized);
+                return isNaN(date) ? null : date;
+            };
 
-            // 處理 CSV 檔案內容
+
+            // 處理 CSV 檔案內容 - 已針對新格式 (訂單編號, 日期, 時間, 名稱, 學生暱稱, 手機, 備註) 進行修正
             const processCSV = (csvText) => {
                 const allRows = parseCSVContent(csvText);
                 if (allRows.length === 0) {
@@ -414,62 +434,78 @@
                 }
 
                 const newBookings = [];
-                let dateFound = "";
-
+                const datesSet = new Set();
+                
                 let headerIndex = -1;
                 for (let i = 0; i < allRows.length; i++) {
                     // 尋找標頭列 (包含關鍵字)
-                    if (allRows[i].some(h => h.includes("消費者暱稱") || h.includes("產品名稱") || h.includes("服務時間"))) {
+                    if (allRows[i].some(h => h.includes("學生暱稱") || h.includes("名稱") || h.includes("時間"))) {
                         headerIndex = i;
                         break;
                     }
                 }
 
                 if (headerIndex === -1) {
-                    setErrorMsg("無法識別標題列，請確認檔案包含「消費者暱稱」、「服務時間」等關鍵欄位。");
+                    setErrorMsg("無法識別標題列，請確認檔案包含「名稱」、「時間」、「學生暱稱」等關鍵欄位。");
                     return;
                 }
 
                 const headers = allRows[headerIndex].map(h => h.trim());
                 const getIndex = (name) => headers.findIndex(h => h === name);
                 
-                const idxProductName = getIndex("產品名稱");
-                const idxServiceTime = getIndex("服務時間");
-                const idxCustomerNick = getIndex("消費者暱稱");
-                const idxCustomerName = getIndex("消費者姓名");
-                const idxCustomerPhone = getIndex("消費者電話"); // 新增電話欄位
-                const idxNotes = getIndex("產品備註");
+                // 依據新 CSV 格式找到欄位索引
+                const idxReservationId = getIndex("訂單編號");
+                const idxDate = getIndex("日期");
+                const idxProductName = getIndex("名稱");
+                const idxServiceTime = getIndex("時間");
+                const idxCustomerNick = getIndex("學生暱稱");
+                const idxCustomerPhone = getIndex("手機");
+                const idxNotes = getIndex("備註");
+                
+                // Safety check for critical fields
+                if (idxProductName === -1 || idxServiceTime === -1 || idxCustomerNick === -1) {
+                     setErrorMsg("CSV 格式不符。請確認包含「名稱」、「時間」、「學生暱稱」欄位。");
+                     return;
+                }
 
-                // 由於 CSV 預設一筆資料為 1 小時，且需要計算一個穩定 ID
                 let reservationCounter = 0; 
 
                 for (let i = headerIndex + 1; i < allRows.length; i++) {
                     const columns = allRows[i];
-                    if (!columns[idxProductName] && !columns[idxServiceTime]) continue;
+                    if (columns.length <= headerIndex) continue; // 忽略空行或過短的行
 
-                    const rawTime = columns[idxServiceTime] || ""; 
+                    const rawTimeRange = columns[idxServiceTime] || ""; // e.g., "06:00 - 06:30"
                     const rawProduct = columns[idxProductName] || "";
                     
-                    let customerName = "未知客戶";
-                    if (idxCustomerNick !== -1 && columns[idxCustomerNick] && columns[idxCustomerNick].trim() !== '') {
-                        customerName = columns[idxCustomerNick];
-                    } else if (idxCustomerName !== -1 && columns[idxCustomerName] && columns[idxCustomerName].trim() !== '') {
-                        customerName = columns[idxCustomerName];
-                    }
+                    let customerName = columns[idxCustomerNick] || "未知客戶";
+                    if (customerName.trim() === '') customerName = "未知客戶";
 
                     const customerPhone = idxCustomerPhone !== -1 ? columns[idxCustomerPhone] : "";
                     const notes = idxNotes !== -1 ? columns[idxNotes] : "";
+                    // 使用訂單編號作為穩定 ID
+                    const uniqueReservationId = idxReservationId !== -1 && columns[idxReservationId] ? columns[idxReservationId] : `csv-${reservationCounter++}-${rawProduct}`;
 
-                    if (!rawTime || !rawProduct) continue;
+                    if (!rawTimeRange || !rawProduct) continue;
 
-                    const timeMatch = rawTime.match(/(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})/);
+                    // 解析 HH:MM - HH:MM 時間範圍
+                    const timeMatch = rawTimeRange.match(/(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/);
+                    
                     if (timeMatch) {
-                        const date = timeMatch[1];
-                        const hour = parseInt(timeMatch[2], 10);
-                        const minute = parseInt(timeMatch[3], 10);
-                        if (!dateFound) dateFound = date;
+                        const startHour = parseInt(timeMatch[1], 10);
+                        const startMinute = parseInt(timeMatch[2], 10);
+                        const endHour = parseInt(timeMatch[3], 10);
+                        const endMinute = parseInt(timeMatch[4], 10);
 
-                        if (hour >= 22) continue; // 忽略 22:00 以後的預約
+                        // 處理日期格式 (例如: "2025年11月24日")
+                        const date = idxDate !== -1 && columns[idxDate] ? columns[idxDate].trim() : new Date().toISOString().split('T')[0];
+                        if (date) datesSet.add(date);
+
+
+                        const startTotalMinutes = startHour * 60 + startMinute;
+                        const endTotalMinutes = endHour * 60 + endMinute;
+
+                        if (startTotalMinutes >= 22 * 60) continue; // 忽略 22:00 以後的預約
+                        if (endTotalMinutes > 22 * 60) continue; // 忽略超過 22:00 的預約
 
                         let courtId = null;
                         
@@ -493,17 +529,9 @@
                             const courtConfig = COURTS.find(c => c.id === courtId);
                             const courtType = courtConfig ? courtConfig.type : 'public';
                             
-                            // CSV 匯入無法得知完整持續時間，預設為 1 小時 (60分鐘)
-                            const startTotalMinutes = hour * 60 + minute;
-                            const durationMinutes = 60;
-                            const endTotalMinutes = startTotalMinutes + durationMinutes;
-                            
                             const timeDisplay = `${formatTime(startTotalMinutes)} - ${formatTime(endTotalMinutes)}`;
 
                             let bookingsForReservation = [];
-                            
-                            // *** 新增穩定預約 ID ***
-                            const uniqueReservationId = `csv-${reservationCounter++}-${courtId}`; 
                             
                             // 檢查預約所佔用的半小時網格 (Grid Slot)
                             const startGridIndex = Math.floor(startTotalMinutes / 30) - (6 * 2); // 06:00 是 index 0
@@ -530,7 +558,8 @@
                                     isDeleted: false,
                                     startTotalMinutes, // 全局開始時間（分鐘）
                                     endTotalMinutes,   // 全局結束時間（分鐘）
-                                    timeDisplay 
+                                    timeDisplay,
+                                    date: date // <-- 新增日期欄位
                                 });
                             }
                             newBookings.push(...bookingsForReservation);
@@ -538,15 +567,43 @@
                     }
                 }
 
+                // 處理所有日期
+                const uniqueDates = Array.from(datesSet)
+                    .sort((a, b) => parseDateString(a) - parseDateString(b));
+                    
+                setAllDates(uniqueDates);
                 setBookings(newBookings);
-                setReportDate(dateFound || new Date().toISOString().split('T')[0]);
+                
+                if (uniqueDates.length > 0) {
+                    // 如果目前選擇的日期不在新的資料中，則自動跳轉到第一個日期
+                    if (!uniqueDates.includes(selectedDate)) {
+                        setSelectedDate(uniqueDates[0]); 
+                    }
+                } else {
+                    // 檔案沒有有效日期，清空選擇
+                    setSelectedDate(""); 
+                }
+
                 setErrorMsg("");
             };
+            
+            // 過濾預約資料 - 只顯示所選日期的數據
+            const filteredBookings = useMemo(() => {
+                if (!selectedDate) return [];
+                // 過濾出與當前選擇日期匹配的預約
+                return bookings.filter(b => b.date === selectedDate);
+            }, [bookings, selectedDate]);
+
 
             // --- 預約管理邏輯 ---
             
             // 點擊半小時網格觸發新增預約
             const openAddModal = (courtId, hour, minute) => {
+                // 必須選擇日期才能新增預約
+                if (!selectedDate) {
+                    setErrorMsg("請先上傳 CSV 檔案並選擇要調度的日期。");
+                    return;
+                }
                 setAddModalState({ isOpen: true, courtId, hour, minute });
             };
 
@@ -592,7 +649,8 @@
                         isDeleted: false,
                         startTotalMinutes, 
                         endTotalMinutes,   
-                        timeDisplay 
+                        timeDisplay,
+                        date: selectedDate // <-- 綁定到當前選定的日期
                     });
                 }
 
@@ -721,7 +779,8 @@
                             gridIndex: idx,
                             startTotalMinutes: newStartTotalMinutes,
                             endTotalMinutes: newEndTotalMinutes,
-                            timeDisplay: newTimeDisplay
+                            timeDisplay: newTimeDisplay,
+                            date: selectedDate // <-- 保持為當前選定日期
                         });
                     }
 
@@ -736,12 +795,14 @@
 
             // 取得單個半小時網格內的預約
             const getBookingsForSlot = (courtId, hour, minute) => {
-                return bookings.filter(b => b.courtId === courtId && b.hour === hour && b.minute === minute);
+                // 從已過濾的清單中取得當前網格的預約
+                return filteredBookings.filter(b => b.courtId === courtId && b.hour === hour && b.minute === minute);
             };
 
             // 統計邏輯 (已調整為半小時單位)
             const stats = useMemo(() => {
-                const activeBookings = bookings.filter(b => !b.isDeleted && b.customerName.toUpperCase() !== BLOCKOUT_KEYWORD);
+                // 使用 filteredBookings 來計算統計
+                const activeBookings = filteredBookings.filter(b => !b.isDeleted && b.customerName.toUpperCase() !== BLOCKOUT_KEYWORD);
                 
                 const uniqueReservations = activeBookings.reduce((acc, booking) => {
                     // 使用 reservationId 來計算獨立預約組數
@@ -782,6 +843,9 @@
                 });
 
                 const publicRate = publicCapacitySlots > 0 ? Math.round((publicUsageSlots / publicCapacitySlots) * 100) : 0;
+                
+                // 計算總預約時數
+                const totalBookedHours = (coachUsageSlots + publicUsageSlots) / 2;
 
                 return {
                     coachUsage: coachUsageSlots / 2, // 換算成時數
@@ -790,9 +854,9 @@
                     publicOccupiedSlots: publicUsageSlots / 2, // 換算成時數
                     publicCapacity: publicCapacitySlots / 2, // 換算成時數
                     publicRate,
-                    totalBookings: uniqueReservations.size
+                    totalBookedHours
                 };
-            }, [bookings]);
+            }, [filteredBookings]);
 
             return (
                 <div className="min-h-screen bg-gray-50 pb-10">
@@ -813,6 +877,7 @@
 
                     <div className="bg-white shadow-sm border-b border-gray-200 print-hide">
                         <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex flex-col md:flex-row justify-between items-center gap-4">
+                            {/* 1. 左側標題/子標題 (使用使用者提供的客製化內容) */}
                             <div className="flex items-center gap-3">
                                 <div className="bg-green-400 text-white p-2 rounded-lg">
                                     <i className="fas fa-tennis-ball text-xl"></i>
@@ -822,9 +887,15 @@
                                     <p className="text-sm text-gray-500">臺中市國際網球中心｜臺中公園網球場</p>
                                 </div>
                             </div>
+                            
+                            {/* 2. 中間 Logo (使用使用者提供的客製化 Logo) */}
+                            <img 
+                                src="https://northwest-sports.com/assets/logo-463d63dd60adb1ff2bed1cf4337d26db65b22e6c6f8708817adb0c1deb419fcd.png" 
+                                alt="Northwest Sports Logo" 
+                                className="h-12 mb-1 hidden md:block" // 桌面顯示
+                            />
 
-                            <img src="https://northwest-sports.com/assets/logo-463d63dd60adb1ff2bed1cf4337d26db65b22e6c6f8708817adb0c1deb419fcd.png" alt="Northwest Sports Logo" className="h-12 mb-1"/>
-
+                            {/* 3. 右側控制項 (上傳/列印) */}
                             <div className="flex items-center gap-3">
                                 <label className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition shadow-sm flex items-center gap-2">
                                     <i className="fas fa-upload"></i>
@@ -853,11 +924,26 @@
                     <div className="max-w-[98%] mx-auto mt-6 print-container">
                         {/* 統計儀表板區塊 */}
                         <div className="mb-6 grid grid-cols-1 md:grid-cols-4 gap-4 print-hide">
-                            {/* 1. 日期卡 */}
-                            <div className="bg-white px-4 py-3 rounded-lg shadow-sm border border-gray-200">
-                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">報表日期</span>
-                                <div className="text-lg font-bold text-gray-900">{reportDate}</div>
-                                <div className="text-xs text-gray-400 mt-1">有效預約組數: {stats.totalBookings}</div>
+                            {/* 1. 日期選擇器 / 總時數 (修正為顯示時數) */}
+                            <div className="bg-white px-4 py-3 rounded-lg shadow-sm border border-gray-200 col-span-1">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider block mb-2">調度日期</span>
+                                <select
+                                    value={selectedDate}
+                                    onChange={(e) => setSelectedDate(e.target.value)}
+                                    className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full font-bold text-gray-900"
+                                    disabled={allDates.length === 0}
+                                >
+                                    {allDates.length === 0 ? (
+                                        <option value="">請先上傳 CSV</option>
+                                    ) : (
+                                        allDates.map(date => (
+                                            <option key={date} value={date}>{date}</option>
+                                        ))
+                                    )}
+                                </select>
+                                <div className="text-xs text-gray-400 mt-1 font-bold text-gray-700">
+                                    總預約時數: <span className="text-lg font-extrabold text-blue-800">{stats.totalBookedHours.toFixed(1)}</span> 小時
+                                </div>
                             </div>
 
                             {/* 2. 教練場使用率 (含公園場) */}
@@ -868,12 +954,12 @@
                                 </div>
                                 <div className="flex items-baseline gap-2 mt-1">
                                     <span className="text-2xl font-bold text-blue-900">{stats.coachRate}%</span>
-                                    <span className="text-xs text-gray-500">({stats.coachUsage} / {stats.coachCapacity} 小時)</span>
+                                    <span className="text-xs text-gray-500">({stats.coachUsage.toFixed(1)} / {stats.coachCapacity.toFixed(1)} 小時)</span>
                                 </div>
                                 <div className="text-[10px] text-gray-400 mt-1">教練場 + 公園場地 (每半小時兩人份容量)</div>
                             </div>
 
-                            {/* 3. 民眾場使用率 */}
+                            {/* 3. 民眾場使用率 (使用使用者指定的綠色 400) */}
                             <div className="bg-white px-4 py-3 rounded-lg shadow-sm border border-l-4 border-l-green-400 border-y border-r border-gray-200">
                                 <div className="flex justify-between items-start">
                                     <span className="text-xs font-semibold text-green-700 uppercase tracking-wider">民眾場地使用率 (小時)</span>
@@ -881,7 +967,7 @@
                                 </div>
                                 <div className="flex items-baseline gap-2 mt-1">
                                     <span className="text-2xl font-bold text-green-700">{stats.publicRate}%</span>
-                                    <span className="text-xs text-gray-500">({stats.publicOccupiedSlots} / {stats.publicCapacity} 小時)</span>
+                                    <span className="text-xs text-gray-500">({stats.publicOccupiedSlots.toFixed(1)} / {stats.publicCapacity.toFixed(1)} 小時)</span>
                                 </div>
                                 <div className="text-[10px] text-gray-400 mt-1">本館民眾場地 (每半小時一人份容量)</div>
                             </div>
@@ -912,12 +998,13 @@
                             </div>
                             <div className="flex items-center gap-2">
                                 <div className="w-3 h-3 rounded-full bg-blue-500"></div>
-                                <span>西北教練場 (亮藍)</span>
+                                <span>本館教練場 (亮藍)</span>
                             </div>
                             <div className="flex items-center gap-2">
-                                <div className="w-3 h-3 rounded-full bg-red-700"></div>
-                                <span>公園場 (紅土)</span>
+                                <div className="w-3 h-3 rounded-full bg-amber-700"></div>
+                                <span>公園場 (橘紅土)</span>
                             </div>
+                            {/* 民眾場顏色使用 400 級 */}
                             <div className="flex items-center gap-2">
                                 <div className="w-3 h-3 rounded-full bg-green-400"></div>
                                 <span>民眾場 (綠)</span>
@@ -939,7 +1026,7 @@
                                     <thead>
                                         <tr>
                                             <th className="p-2 bg-gray-800 text-white font-medium sticky left-0 z-20 w-24 text-center border-b border-gray-700">
-                                                <span className="text-xs block">時間</span>
+                                                <span className="text-sm font-bold block">時間</span>
                                             </th>
                                             {COURTS.map(court => (
                                                 <th key={court.id} className={`
@@ -962,14 +1049,17 @@
 
                                             return (
                                                 <tr key={gridIndex} className="hover:bg-gray-50">
-                                                    {/* 時間欄位修正：強制顯示 HH:MM */}
+                                                    {/* 時間欄位修正：強制顯示 HH:MM 在同一行 */}
                                                     <td 
                                                         className={`p-1 bg-gray-50 border-b border-r border-gray-200 font-bold text-center sticky left-0 z-10 text-gray-600 select-none h-10 
                                                             ${isHourStart ? 'border-t-2 border-t-gray-300' : 'border-t border-t-gray-200'}`}
                                                     >
-                                                        <div className="text-center text-xs leading-tight">
-                                                            <span className="font-bold text-gray-800 block">
-                                                                {hour.toString().padStart(2, '0')}:{minute.toString().padStart(2, '0')}
+                                                        <div className="time-cell-content text-xs leading-tight">
+                                                            <span className="font-bold text-gray-800">
+                                                                {hour.toString().padStart(2, '0')}:
+                                                            </span>
+                                                            <span className="text-gray-600">
+                                                                {minute.toString().padStart(2, '0')}
                                                             </span>
                                                         </div>
                                                     </td>
@@ -993,7 +1083,7 @@
                                                                     ${isDragOver ? 'drag-over' : ''}
                                                                     ${isHourStart ? 'border-t-2 border-t-gray-300' : 'border-t border-t-gray-200'}
                                                                     hover:bg-gray-100
-                                                                    ${court.type === 'park' ? 'bg-red-50/50' : ''}
+                                                                    ${court.type === 'park' ? 'bg-amber-50/50' : ''}
                                                                 `}>
                                                                 
                                                                 <div className={`w-full h-full flex ${isSplittable ? '' : 'justify-center items-center'}`}>
@@ -1064,7 +1154,8 @@
             if (booking.courtType === 'coach' && !booking.isNew && !booking.isDeleted && !isBlockout) {
                  finalBookingClassName = `bg-[#002050] border-blue-400 text-white hover:bg-blue-900 shadow-sm`;
             } else if (booking.courtType === 'park' && !booking.isNew && !booking.isDeleted && !isBlockout) {
-                 finalBookingClassName = `bg-red-200 border-red-500 text-red-900 hover:bg-red-300 shadow-sm`;
+                 // 使用橘紅色/琥珀色
+                 finalBookingClassName = `bg-amber-200 border-amber-500 text-amber-900 hover:bg-amber-300 shadow-sm`;
             }
 
 
