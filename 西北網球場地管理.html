@@ -96,8 +96,8 @@
             { id: '9', name: '9號場', type: 'public' },
             { id: '10', name: '10號場 (教練)', type: 'coach' },
             { id: 'central', name: '中央球場', type: 'public' },
-            { id: 'park1', name: '臺中公園1號', type: 'park' }, 
-            { id: 'park2', name: '臺中公園2號', type: 'park' }      
+            { id: 'park1', name: '公園1號(公園側)', type: 'park' }, 
+            { id: 'park2', name: '公園2號(馬路側)', type: 'park' }      
         ];
 
         const HALF_HOURS = Array.from({ length: 32 }, (_, i) => {
@@ -145,8 +145,8 @@
 
         function parseCourtToId(str) {
             if (!str) return null;
-            if (str.includes('公園1') || str.includes('公園一')) return 'park1';
-            if (str.includes('公園2') || str.includes('公園二')) return 'park2';
+            if (str.includes('公園網球場1號') || str.includes('公園一')) return 'park1';
+            if (str.includes('公園網球場2號') || str.includes('公園二')) return 'park2';
             if (str.includes('中央')) return 'central';
             const numMatch = str.match(/\d+/);
             if (numMatch) return numMatch[0]; 
